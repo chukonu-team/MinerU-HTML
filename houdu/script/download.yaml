@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: download-html
+  namespace: houdu
+spec:
+  selector:
+    matchLabels:
+      name: download-html-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: download-html-ds
+    spec:
+      containers:
+      - name: download-html-container  # 添加了容器名称
+        image: 10.242.128.137:5000/mineru:2.6.4
+        imagePullPolicy: Always
+        command: [ "python3", "/data/MinerU-HTML/houdu/main/download.py" ]
+        env:
+          - name: AWS_ACCESS_KEY_ID
+            value: "******"
+          - name: AWS_SECRET_ACCESS_KEY
+            value: "******"
+          - name: AWS_DEFAULT_REGION
+            value: "cn-north-4"
+          - name: AWS_ENDPOINT
+            value: "https://google-scholar.obs.cn-north-4.myhuaweicloud.com"
+          - name: S3_TYPE
+            value: "s3"
+          - name: S3_BUCKET
+            value: "houdu"
+          - name: BUCKET_TXT_KEY_PATH
+            value: "/data/MinerU-HTML/chunk_keys"
+          - name: JSON_MAP_PATH
+            value: "/data/MinerU-HTML/bucket_map.json"
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        resources:
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+          requests:
+            memory: "8Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: scripts
+          mountPath: /data/MinerU-HTML
+        - name: mnt
+          mountPath: /mnt
+      volumes:
+      - name: scripts
+        hostPath:
+          path: /data/MinerU-HTML
+      - name: mnt
+        hostPath:
+          path: /ssd/cc_html
+          type: DirectoryOrCreate
+      nodeSelector:
+        accelerator: nvidia-gpu
