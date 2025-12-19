@@ -12,14 +12,25 @@ class InferenceBackend(ABC):
 
 class VLLMInferenceBackend(InferenceBackend):
     def __init__(self, model_path:str, tensor_parallel_size:int):
-        # self.gen_config = SamplingParams(
-        #     top_k=1, top_p=0.95, temperature=0, max_tokens=8 * 1024
-        # )
         self.gen_config = SamplingParams(
-            temperature=0.7,
-            max_tokens=1024,  # 单次生成 1K token，充分利用批量
-            top_p=0.95
+            top_k=1, top_p=0.95, temperature=0, max_tokens=8 * 1024
         )
+        # self.gen_config = SamplingParams(
+        #     temperature=0.7,
+        #     max_tokens=1024,  # 单次生成 1K token，充分利用批量
+        #     top_p=0.95
+        # )
+        
+        self._llm = LLM(model=model_path,
+                tensor_parallel_size=tensor_parallel_size,
+                disable_log_stats=False,
+                gpu_memory_utilization=0.85,
+                max_num_batched_tokens=8192,
+                enable_prefix_caching=True,
+                max_num_seqs=32,
+                kv_cache_dtype="fp8_e5m2"
+            )
+
         
         # self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size, disable_log_stats=False)
         # self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size, disable_log_stats=False, gpu_memory_utilization=0.7)
