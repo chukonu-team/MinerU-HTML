@@ -1,10 +1,6 @@
-import json
 import logging
 import os
-import shutil
 import sys
-import time
-from typing import List
 from common import get_subdirectories, has_files
 from process_html import process_html
 
@@ -17,8 +13,8 @@ def process():
     gpu_ids = os.getenv("GPU_IDS")
     vram_size_gb = os.getenv("VRAM_SIZE_GB")
     workers_per_gpu = os.getenv("WORKERS_PER_GPU")
-    proportion = os.getenv("PROPORTION", 0)
-    min_files = os.getenv("MIN_FILES",300)
+    proportion = os.getenv("PROPORTION", 0.03)
+    batch_size = int(os.getenv("BATCH_SIZE", 100))
 
     file_dir = "/mnt/data/input"
     list_dir = get_subdirectories(file_dir)
@@ -56,6 +52,7 @@ def process():
             vram_size_gb=int(vram_size_gb),
             gpu_ids=gpu_ids,
             workers_per_gpu=int(workers_per_gpu),
+            batch_size=batch_size,
         )
         sys.exit(0)
 

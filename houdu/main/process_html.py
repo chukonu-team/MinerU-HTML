@@ -6,8 +6,9 @@ import re
 import time
 import glob
 import zlib
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import traceback
+import math
 
 # 导入简化的进程池
 from process_pool import SimpleProcessPool
@@ -16,19 +17,20 @@ from dripper.api import Dripper
 # Initialize with model path
 dripper = Dripper(
     config={
-        'model_path': os.environ.get("MODEL_PATH","/data/models"),  # Required
-        'tp': os.environ.get("TENSOR_PARALLEL",1),                                # Tensor parallel size
-        'use_fall_back': True,                  # Enable trafilatura fallback
-        'raise_errors': False,                  # Return None on errors
+        'model_path': os.environ.get("MODEL_PATH", "/data/models"),  # Required
+        'tp': os.environ.get("TENSOR_PARALLEL", 1),  # Tensor parallel size
+        'use_fall_back': True,  # Enable trafilatura fallback
+        'raise_errors': False,  # Return None on errors
     }
 )
 
-def read_html_from_warc_gz(warc_gz_path: str) -> list[Any] | None:
+
+def read_html_from_warc_gz(warc_gz_path: str) -> list[str]:
     """
-    最简单的方法：获取整个文件的原始文本内容
+    读取WARC文件并返回HTML内容列表
     """
-    decompressed_data=""
-    html_list=[]
+    decompressed_data = ""
+    html_list = []
     try:
         # 解压文件
         with open(warc_gz_path, 'rb') as f:
@@ -52,71 +54,119 @@ def read_html_from_warc_gz(warc_gz_path: str) -> list[Any] | None:
         data_str = decompressed_data.decode('utf-8', errors='ignore')
         html_list.append(data_str)
     except Exception as e:
-        print(e)
+        print(f"Error reading {warc_gz_path}: {e}")
 
     return html_list
 
 
-def process_one(file_path, save_dir):
-    result = {'success': False}
+def process_batch(file_paths: List[str], save_dir: str, batch_id: int = 0) -> Dict[str, Any]:
+    """
+    批量处理文件
+    """
+    result = {'success': False, 'processed': 0, 'failed': 0, 'batch_id': batch_id}
+    all_htmls = []
+    file_info = []  # 记录每个文件的信息
+
     try:
-        file_base_name = os.path.basename(file_path).replace('.warc.gz', '')
         # 确保保存目录存在
         os.makedirs(save_dir, exist_ok=True)
 
-        html_list = read_html_from_warc_gz(file_path)
-        print(f"html_list=============== {len(html_list)} ")
-        input_map, generate_inputs, process_datas = dripper.pre_process_data(html_list)
+        # 批量读取所有文件的HTML内容
+        for file_path in file_paths:
+            try:
+                html_list = read_html_from_warc_gz(file_path)
+                if html_list:
+                    all_htmls.extend(html_list)
+                    # 记录文件信息：文件路径、HTML内容索引
+                    for i, html in enumerate(html_list):
+                        file_info.append({
+                            'file_path': file_path,
+                            'html_index': i,
+                            'file_base_name': os.path.basename(file_path).replace('.warc.gz', ''),
+                            'total_in_file': len(html_list)
+                        })
+                else:
+                    result['failed'] += 1
+                    print(f"No HTML content found in {file_path}")
+            except Exception as e:
+                result['failed'] += 1
+                print(f"Error reading {file_path}: {e}")
+
+        if not all_htmls:
+            print(f"Batch {batch_id}: No HTML content to process")
+            return result
+
+        print(f"Batch {batch_id}: Processing {len(all_htmls)} HTMLs from {len(file_paths)} files")
+
+        # 批量处理HTML
+        input_map, generate_inputs, process_datas = dripper.pre_process_data(all_htmls)
         batch_results = dripper.process_data_ex(input_map, generate_inputs, process_datas)
 
         if batch_results:
-            if len(batch_results) == 1:
-                result_content = batch_results[0].main_html
-                print(f"result_content=============== {result_content} ")
-                result_path = os.path.join(save_dir, f"{file_base_name}.html.gz")
-                # 确保内容是字节类型
-                if isinstance(result_content, str):
-                    result_content = result_content.encode('utf-8')
+            # 保存处理结果
+            success_count = 0
+            for idx, batch_result in enumerate(batch_results):
+                if idx >= len(file_info):
+                    print(f"Warning: Result index {idx} out of range for file_info")
+                    continue
 
-                with gzip.open(result_path, 'wb') as f:
-                    f.write(result_content)
+                file_info_item = file_info[idx]
+                result_content = batch_result.main_html
 
-                result = {'success': True}
-                return result
+                # 生成文件名
+                if file_info_item['total_in_file'] == 1:
+                    # 如果文件只有一个HTML，使用原始文件名
+                    result_filename = f"{file_info_item['file_base_name']}.html.gz"
+                else:
+                    # 如果文件有多个HTML，添加索引
+                    result_filename = f"{file_info_item['file_base_name']}_{file_info_item['html_index']}.html.gz"
 
-            # 如果多个文件，批量保存（当前注释掉的代码）
-            # else:
-            #     for batch_result in batch_results:
-            #         case_id = batch_result.case_id
-            #         html = batch_result.main_html
-            #         result_path = os.path.join(save_dir, str(file_base_name), f"{case_id}.txt")
-            #         os.makedirs(os.path.dirname(result_path), exist_ok=True)
-            #         with open(result_path, 'w', encoding='utf-8') as f:
-            #             f.write(html)
+                result_path = os.path.join(save_dir, result_filename)
+
+                try:
+                    # 确保内容是字节类型
+                    if isinstance(result_content, str):
+                        result_content = result_content.encode('utf-8')
+
+                    with gzip.open(result_path, 'wb') as f:
+                        f.write(result_content)
+
+                    success_count += 1
+                except Exception as e:
+                    print(f"Error saving {result_path}: {e}")
+                    result['failed'] += 1
+
+            result['success'] = True
+            result['processed'] = success_count
+            print(f"Batch {batch_id}: Successfully processed {success_count} HTMLs")
 
     except Exception as e:
-        print(f"process one failed - {str(e)}")
-        return result
+        print(f"Batch {batch_id} processing failed: {str(e)}")
+        traceback.print_exc()
 
-def gpu_worker_task(file_path, save_dir, gpu_id=None):
+    return result
+
+
+def gpu_worker_task(file_paths: List[str], save_dir: str, batch_id: int = 0, gpu_id=None):
     """
-    GPU工作进程的任务函数 - 简化版本
-    每个工作进程处理单个PDF文件
+    GPU工作进程的任务函数 - 批量处理版本
     """
     if gpu_id is None:
         gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES", "unknown")
 
     try:
-        # 执行PDF处理
-        result = process_one(file_path, save_dir)
+        # 执行批量处理
+        result = process_batch(file_paths, save_dir, batch_id)
         result['gpu_id'] = gpu_id
+        result['batch_id'] = batch_id
         return result
     except Exception as e:
         return {
             'success': False,
             'error': str(e),
-            'input_path': file_path,
+            'input_paths': file_paths,
             'gpu_id': gpu_id,
+            'batch_id': batch_id,
             'traceback': traceback.format_exc()
         }
 
@@ -127,10 +177,12 @@ class SimpleMinerUPool:
                  gpu_ids: List[int],
                  workers_per_gpu: int = 2,
                  vram_size_gb: int = 24,
-                 model_path: str = None,):
+                 batch_size: int = 8,  # 每个批次的文件数
+                 model_path: str = None, ):
         self.gpu_ids = gpu_ids
         self.workers_per_gpu = workers_per_gpu
         self.vram_size_gb = vram_size_gb
+        self.batch_size = batch_size
         self.model_path = model_path
 
         # 设置环境变量 - 增加内存使用配置
@@ -140,78 +192,123 @@ class SimpleMinerUPool:
         self.process_pool = SimpleProcessPool(gpu_ids=gpu_ids, workers_per_gpu=workers_per_gpu)
         print(
             f"Created MinerU pool: {len(gpu_ids)} GPUs × {workers_per_gpu} workers = {len(gpu_ids) * workers_per_gpu} total workers")
+        print(f"Batch settings: {batch_size} files per batch")
+
+    def _create_batches(self, files: List[str]) -> List[List[str]]:
+        """
+        将文件列表分成批次
+        """
+        batches = []
+
+        for i in range(0, len(files), self.batch_size):
+            batch_files = files[i:i + self.batch_size]
+
+            # 过滤已处理的文件
+            filtered_batch = []
+            for file_path in batch_files:
+                result_name = os.path.basename(file_path).replace(".warc.gz", "")
+                # 检查是否已处理单个HTML文件
+                target_file = f"{self.output_dir}/{result_name}.html.gz"
+                # 检查是否已处理多个HTML文件（如果文件包含多个HTML）
+                target_pattern = f"{self.output_dir}/{result_name}_*.html.gz"
+
+                # 如果还没有处理过任何该文件的输出，则添加到处理队列
+                if not os.path.exists(target_file) and not glob.glob(target_pattern):
+                    filtered_batch.append(file_path)
+                else:
+                    print(f"Already processed: {file_path}")
+
+            if filtered_batch:
+                batches.append(filtered_batch)
+
+        return batches
 
     def process_files(self, files: List[str], output_dir: str) -> List[Dict]:
-        print(f"Processing {len(files)} PDF files using {len(self.gpu_ids)} GPUs...")
+        print(f"Processing {len(files)} files using {len(self.gpu_ids)} GPUs...")
+        self.output_dir = output_dir
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
-        # 过滤已处理的文件
-        files_to_process = []
-        for file_path in files:
-            result_name = os.path.basename(file_path).replace(".warc.gz", "")
-            target_file = f"{output_dir}/{result_name}.html.gz"
-            if os.path.exists(target_file):
-                print(f"Already processed: {file_path} -> {target_file}")
-                continue
-            files_to_process.append(file_path)
 
-        if not files_to_process:
+        # 创建批次
+        batches = self._create_batches(files)
+
+        if not batches:
             print("No files need processing")
             return []
-        print(f"After filtering: {len(files_to_process)} files to process")
+
+        print(f"Created {len(batches)} batches for processing")
+
         results = []
-        task_info = {}  # 存储任务ID和输入路径的映射
+        task_info = {}  # 存储任务ID和批次信息的映射
 
         try:
-            # 提交所有任务
-            for file_path in files_to_process:
-                task_data = (file_path, output_dir)
+            # 提交所有批次任务
+            for batch_id, batch_files in enumerate(batches):
+                task_data = (batch_files, output_dir, batch_id)
                 task_id = self.process_pool.submit_task(gpu_worker_task, *task_data)
-                task_info[task_id] = file_path
+                task_info[task_id] = {
+                    'batch_id': batch_id,
+                    'file_count': len(batch_files),
+                    'files': batch_files
+                }
+                print(f"Submitted batch {batch_id} with {len(batch_files)} files")
 
-            print(f"Submitted {len(files_to_process)} tasks to process pool")
+            print(f"Submitted {len(batches)} batches to process pool")
 
             # 设置完成信号
             self.process_pool.set_complete_signal()
 
             # 收集结果
             start_time = time.time()
+            batch_times = []
 
             # 等待所有任务完成
-            for _ in range(len(files_to_process)):
+            for _ in range(len(batches)):
                 result = self.process_pool.get_result()
                 if result:
                     task_id, status, data = result
-                    pdf_path = task_info.get(task_id, "unknown")
+                    batch_info = task_info.get(task_id, {})
+                    batch_id = batch_info.get('batch_id', 'unknown')
 
                     if status == 'success':
                         results.append(data)
-                        print(f"Task completed: {pdf_path}")
+                        batch_time = time.time() - start_time
+                        batch_times.append(batch_time)
+                        print(f"Batch {batch_id} completed: processed {data.get('processed', 0)} HTMLs, "
+                              f"failed {data.get('failed', 0)} in {batch_time:.1f}s")
                     elif status == 'error':
                         error_result = {
                             'success': False,
                             'error': data,
-                            'input_path': pdf_path
+                            'batch_id': batch_id,
+                            'file_count': batch_info.get('file_count', 0)
                         }
                         results.append(error_result)
-                        print(f"Task failed: {pdf_path} with error: {data}")
+                        print(f"Batch {batch_id} failed with error: {data}")
 
             total_time = time.time() - start_time
+
+            # 统计结果
             success_count = sum(1 for r in results if r.get('success', False))
-            skipped_count = sum(1 for r in results if r.get('skipped', False))
+            total_processed = sum(r.get('processed', 0) for r in results if r.get('success', False))
+            total_failed = sum(r.get('failed', 0) for r in results if r.get('success', False))
+            error_count = sum(1 for r in results if not r.get('success', False))
 
             print(f"\nProcessing complete!")
             print(f"Total time: {total_time:.1f} seconds")
-            print(
-                f"Success: {success_count}, Skipped: {skipped_count}, Errors: {len(results) - success_count - skipped_count}")
+            print(f"Batches: {len(batches)} total, {success_count} successful, {error_count} failed")
+            print(f"HTMLs: {total_processed} processed, {total_failed} failed")
 
-            if success_count > 0:
-                print(f"Average: {total_time / success_count:.2f} seconds per successful file")
+            if success_count > 0 and batch_times:
+                avg_batch_time = sum(batch_times) / len(batch_times)
+                print(f"Average batch time: {avg_batch_time:.2f} seconds")
+                if total_processed > 0:
+                    print(f"Average: {total_time / total_processed:.2f} seconds per HTML")
 
             return results
 
         except Exception as e:
-            print(f"Unexpected error in process_pdf_files: {e}")
+            print(f"Unexpected error in process_files: {e}")
             traceback.print_exc()
             return results
         finally:
@@ -232,9 +329,10 @@ def process_html(
         output_dir,
         gpu_ids='0,1,2,3,4,5,6,7',
         workers_per_gpu=2,
-        vram_size_gb=24
+        vram_size_gb=24,
+        batch_size=8,
 ):
-    """处理PDF文件的函数，可通过参数直接调用"""
+    """处理HTML文件的函数，可通过参数直接调用"""
     # 解析GPU ID
     gpu_ids = [int(x.strip()) for x in gpu_ids.split(',')]
 
@@ -242,16 +340,18 @@ def process_html(
     print(f"Found {len(files)} files")
     print(f"Using GPUs: {gpu_ids}")
     print(f"Workers per GPU: {workers_per_gpu}")
+    print(f"Batch size: {batch_size} files per batch")
 
     if not files:
-        print("No PDF files found!")
+        print("No files found!")
         return
 
     # 创建处理池并运行
     with SimpleMinerUPool(
             gpu_ids=gpu_ids,
             workers_per_gpu=workers_per_gpu,
-            vram_size_gb=vram_size_gb
+            vram_size_gb=vram_size_gb,
+            batch_size=batch_size
     ) as pool:
         results = pool.process_files(files, output_dir)
 
@@ -260,12 +360,14 @@ def process_html(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Fixed MinerU PDF Processing")
-    parser.add_argument('--input-dir', type=str, required=True)
-    parser.add_argument('--output-dir', type=str, required=True)
-    parser.add_argument('--gpu-ids', type=str, default='0,1,2,3,4,5,6,7')
-    parser.add_argument('--workers-per-gpu', type=int, default=2)
-    parser.add_argument('--vram-size-gb', type=int, default=8)
+
+    parser = argparse.ArgumentParser(description="MinerU WARC HTML Processing with Batch Support")
+    parser.add_argument('--input-dir', type=str, required=True, help="Input directory containing .warc.gz files")
+    parser.add_argument('--output-dir', type=str, required=True, help="Output directory for processed HTMLs")
+    parser.add_argument('--gpu-ids', type=str, default='0,1,2,3,4,5,6,7', help="Comma-separated GPU IDs")
+    parser.add_argument('--workers-per-gpu', type=int, default=2, help="Number of workers per GPU")
+    parser.add_argument('--vram-size-gb', type=int, default=8, help="VRAM size per GPU in GB")
+    parser.add_argument('--batch-size', type=int, default=8, help="Number of files per batch")
     args = parser.parse_args()
 
     process_html(
@@ -274,4 +376,5 @@ if __name__ == "__main__":
         gpu_ids=args.gpu_ids,
         workers_per_gpu=args.workers_per_gpu,
         vram_size_gb=args.vram_size_gb,
+        batch_size=args.batch_size,
     )
