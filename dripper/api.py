@@ -590,7 +590,124 @@ class Dripper:
         except Exception as e:
             logger.error(f'Error occurred during processing: {str(e)}')
             raise
+        
+    def generate_data(
+        self,
+        # input_map: Dict[int, DripperInput],
+        generate_inputs: Dict[int, DripperGenerateInput],
+        # process_datas: Dict[int, DripperProcessData],
+    ) -> list[DripperGenerateOutput]:
+        """
+        Process preprocessed data through model inference and postprocessing.
 
+        Args:
+            input_map: Dictionary mapping indices to DripperInput objects
+            generate_inputs: Dictionary mapping indices to DripperGenerateInput objects
+            process_datas: Dictionary mapping indices to DripperProcessData objects
+
+        Returns:
+            In normal mode: List of DripperOutput objects
+            In debug mode: Tuple of (output_map, generate_inputs, process_datas)
+        """
+        try:
+            # Get LLM instance and perform batch inference
+            logger.info('process_data_ex: get_llm')
+            llm = self.get_llm()
+            logger.info('process_data_ex: Starting model inference')
+            to_process_keys = sorted(generate_inputs.keys())
+            generate_outputs = generate(
+                llm,
+                [generate_inputs[key] for key in to_process_keys],
+                self.state_machine,
+            )
+            logger.info('process_data_ex: model inference end!!!')
+            return generate_outputs
+        except Exception as e:
+            logger.error(f'Error occurred during processing: {str(e)}')
+            raise
+
+    def post_process_data(
+        self,
+        input_map: Dict[int, DripperInput],
+        generate_inputs: Dict[int, DripperGenerateInput],
+        process_datas: Dict[int, DripperProcessData],
+        generate_outputs: list[DripperGenerateOutput]
+    ) -> Union[List[DripperOutput], Tuple]:
+        """
+        Process preprocessed data through model inference and postprocessing.
+
+        Args:
+            input_map: Dictionary mapping indices to DripperInput objects
+            generate_inputs: Dictionary mapping indices to DripperGenerateInput objects
+            process_datas: Dictionary mapping indices to DripperProcessData objects
+
+        Returns:
+            In normal mode: List of DripperOutput objects
+            In debug mode: Tuple of (output_map, generate_inputs, process_datas)
+        """
+        try:
+            # Get LLM instance and perform batch inference
+            # logger.info('process_data_ex: get_llm')
+            # llm = self.get_llm()
+            # logger.info('process_data_ex: Starting model inference')
+            to_process_keys = sorted(generate_inputs.keys())
+            # generate_outputs = generate(
+            #     llm,
+            #     [generate_inputs[key] for key in to_process_keys],
+            #     self.state_machine,
+            # )
+            # logger.info('process_data_ex: Starting post_process')
+            # Postprocess all outputs
+            output_map = {}
+            for idx, generate_output in zip(to_process_keys, generate_outputs):
+                process_data = process_datas[idx]
+                try:
+                    output = self.post_process(generate_output, process_data)
+                except Exception as e:
+                    if self.raise_errors:
+                        raise e
+                    continue
+                output_map[idx] = output
+
+            # Handle cases that failed during preprocessing or postprocessing
+            for idx in input_map.keys():
+                if idx not in output_map:
+                    if self.use_fall_back:
+                        try:
+                            output = self.fall_back_func(
+                                input_map[idx].raw_html, input_map[idx].url
+                            )
+                            output_map[idx] = DripperOutput(
+                                main_html=output,
+                                case_id=input_map[idx].case_id,
+                            )
+                        except Exception as e:
+                            if self.raise_errors:
+                                raise e
+                            output_map[idx] = DripperOutput(
+                                main_html=None,
+                                case_id=input_map[idx].case_id,
+                            )
+                    else:
+                        output_map[idx] = DripperOutput(
+                            main_html=None, case_id=input_map[idx].case_id
+                        )
+
+            logger.info(f'Processing completed, output {len(output_map)} results')
+
+            # Return different formats based on debug mode
+            if self.debug:
+                # Debug mode: return output map, generate inputs, and process data
+                return output_map, generate_inputs, process_datas
+            else:
+                # Normal mode: return only final output results
+                sorted_keys = sorted(output_map.keys())
+                output_list = [output_map[key] for key in sorted_keys]
+                return output_list
+
+        except Exception as e:
+            logger.error(f'Error occurred during processing: {str(e)}')
+            raise
     def processEx(
         self,
         input_data: Union[DripperInput, List[DripperInput], str, List[str]],
@@ -614,4 +731,5 @@ class Dripper:
         """
         # Use the two new functions to implement the original process functionality
         input_map, generate_inputs, process_datas = self.pre_process_data(input_data)
-        return self.process_data_ex(input_map, generate_inputs, process_datas)
+        generate_outputs = self.generate_data(generate_inputs)
+        return self.post_process_data(input_map, generate_inputs, process_datas, generate_outputs)
