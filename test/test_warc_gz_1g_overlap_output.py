@@ -18,19 +18,20 @@ logger = logging.getLogger(__name__)
 from dripper.api import Dripper
 
 
-class HtmlDataProducer:
+class HtmlDataIO:
     def __init__(self, warc_file_path, batch_size=100):
         self.batch_size = batch_size
         self.current_index = 0
         start_time = time.time()
-        logger.info(f"HtmlDataProducer : read_html_from_warc_gz warc_file_path:{warc_file_path}")
+        logger.info(f"HtmlDataIO : read_html_from_warc_gz warc_file_path:{warc_file_path}")
         self.warc_file_path = warc_file_path
         self.html_list = self.read_html_from_warc_gz(self.warc_file_path)
         self.total_count = len(self.html_list)
-        self.total_count = 1000 # test
+        self.total_count = 100 # test
         end_time = time.time()
         elapsed_time = end_time - start_time
-        logger.info(f"HtmlDataProducer : File reading took {elapsed_time:.2f} seconds")
+        logger.info(f"HtmlDataIO : File reading took {elapsed_time:.2f} seconds")
+        self.all_results = []
 
     
     def consume_batch(self, batch_size=None):
@@ -60,6 +61,12 @@ class HtmlDataProducer:
         has_data_flag = self.current_index < self.total_count
         
         return data_batch, has_data_flag
+
+    def result_callback_batch(self, html_str_list):
+        logger.info(f"HtmlDataIO result_callback_batch len {len(html_str_list)}")
+        self.all_results.extend(html_str_list)
+
+
     def read_html_from_warc_gz(self, warc_gz_path: str) -> list[str]:
         """
         从 warc.gz 文件中提取所有 HTML 字符串，返回列表
@@ -115,21 +122,21 @@ class HtmlDataProducer:
         return html_list
 
 class DripperRunner:
-    def __init__(self, dripper: Dripper, html_data_producer: HtmlDataProducer):
+    def __init__(self, dripper: Dripper, html_data_io: HtmlDataIO):
         """
         初始化 DripperRunner
         
         Args:
             dripper: Dripper实例
-            html_data_producer: HTML数据生产者实例
+            html_data_io: HTML数据生产者实例
             config: 配置字典（可选，如果提供则会覆盖dripper的设置）
         """
         self.dripper = dripper
-        self.html_data_producer = html_data_producer
+        self.html_data_io = html_data_io
         self.process_running = True
         self.preprocess_result_queue = Queue()
         self.generate_result_queue = Queue()
-        self.postprocess_result_queue = Queue()
+        # self.postprocess_result_queue = Queue()
         self.processes = []
         self.all_results = []
         
@@ -164,7 +171,7 @@ class DripperRunner:
             index = 1
             while has_data:
                                 # 获取下一批数据
-                html_list, has_data = self.html_data_producer.consume_batch()
+                html_list, has_data = self.html_data_io.consume_batch()
                 current_batch = html_list
                 logger.info(f"Worker {worker_id}: Processing batch starting at index {index}, size {len(current_batch)}")
                 
@@ -195,11 +202,11 @@ class DripperRunner:
         """
         启动后处理工作进程
         """
-        p = Process(target=self._postprocess_worker_all, args=(worker_id,))
+        p = Process(target=self._postprocess_worker_all, args=(worker_id,self.html_data_io,))
         p.start()
         return p
     
-    def _postprocess_worker_all(self, worker_id: int):
+    def _postprocess_worker_all(self, worker_id: int, html_data_io: HtmlDataIO):
         """
         后处理工作函数，处理预处理结果
         """
@@ -221,7 +228,8 @@ class DripperRunner:
                 input_map, generate_inputs, process_datas, process_results = process_result_pack
                 batch_results = self.dripper.post_process_data(input_map, generate_inputs, process_datas, process_results)
                 # self.all_results.extend(batch_results)
-                self.postprocess_result_queue.put(batch_results)
+                # self.postprocess_result_queue.put(batch_results)
+                html_data_io.result_callback_batch(batch_results)
 
             except queue.Empty:
                 # 队列为空，继续循环
@@ -230,7 +238,7 @@ class DripperRunner:
             except Exception as e:
                 process_result_pack = None
                 logger.info(f"Worker {worker_id}: Fatal error - {str(e)}")
-        self.postprocess_result_queue.put(None)
+        # self.postprocess_result_queue.put(None)
         logger.info(f"Worker {worker_id}: postprocess_worker end")
 
     
@@ -285,24 +293,23 @@ class DripperRunner:
         # while self.postprocess_result_queue.qsize() > 0:
         #     self.all_results.extend(self.postprocess_result_queue.get())
         # 获取处理结果 - 持续获取直到获取到None
-        while True:
-            try:
-                result = self.postprocess_result_queue.get(timeout=1)  # 使用较短超时避免无限等待
-                if result is None:  # 如果获取到None，则停止获取
-                    logger.info("Received None, stopping result collection")
-                    break
-                self.all_results.extend(result)  # 将结果添加到列表中
-            except queue.Empty:
-                logger.info("No more results in postprocess queue, continue collection")
-                continue
-
-        self._cleanup_processes()
-        # 打印结果
-        if self.all_results:
-            logger.info(f"results len:{len(self.all_results)}")
-            logger.info(self.all_results[0].main_html)
+        # while True:
+        #     try:
+        #         result = self.postprocess_result_queue.get(timeout=1)  # 使用较短超时避免无限等待
+        #         if result is None:  # 如果获取到None，则停止获取
+        #             logger.info("Received None, stopping result collection")
+        #             break
+        #         self.all_results.extend(result)  # 将结果添加到列表中
+        #     except queue.Empty:
+        #         logger.info("No more results in postprocess queue, continue collection")
+        #         continue
+        # self._cleanup_processes()
+        # # 打印结果
+        # if self.all_results:
+        #     logger.info(f"results len:{len(self.all_results)}")
+        #     logger.info(self.all_results[0].main_html)
             
-        return self.all_results
+        # return self.all_results
     
     def _cleanup_processes(self):
         """
@@ -333,8 +340,8 @@ def main():
         }
     )
 
-    # Create HtmlDataProducer
-    html_data_producer = HtmlDataProducer(warc_file_path='/root/data/CC-MAIN-20250918080014-20250918110014-00995.warc.gz', batch_size=300)
+    # Create HtmlDataIO
+    html_data_io = HtmlDataIO(warc_file_path='/root/data/CC-MAIN-20250918080014-20250918110014-00995.warc.gz', batch_size=300)
 
     # Run profiling if needed
     pr = cProfile.Profile()
@@ -344,7 +351,7 @@ def main():
 
     # Run the processing
     # Create DripperRunner
-    runner = DripperRunner(dripper, html_data_producer)
+    runner = DripperRunner(dripper, html_data_io)
 
     end_time = time.time()
     elapsed_time = end_time - start_time0
