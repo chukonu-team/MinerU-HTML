@@ -87,6 +87,7 @@ class DripperGenerateInput:
         alg_html: str,
         prompt: Union[Callable[[str], str], str],
         case_id: str = None,
+        seq_length: int = 0,
     ):
         """
         Initialize DripperGenerateInput.
@@ -112,6 +113,7 @@ class DripperGenerateInput:
         self.case_id = case_id
         # Extract and validate maximum item ID from HTML
         self.max_item_id = check_and_find_max_item_id(alg_html)
+        self.seq_length = seq_length
 
     @classmethod
     def from_dict(cls, data: dict) -> 'DripperGenerateInput':
