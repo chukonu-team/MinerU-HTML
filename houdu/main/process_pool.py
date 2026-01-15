@@ -167,6 +167,14 @@ class SimpleProcessPool:
 
         self.workers.clear()
         print("Process pool shutdown complete")
+        while not self.task_queue.empty():
+            self.task_queue.get_nowait()
+
+        while not self.result_queue.empty():
+            self.result_queue.get_nowait()
+        print("All Queue clear complete")
+
+
 
     def __enter__(self):
         return self
