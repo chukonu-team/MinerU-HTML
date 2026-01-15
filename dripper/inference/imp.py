@@ -34,7 +34,7 @@ class VLLMInferenceBackend(InferenceBackend):
     @override
     def generate(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
         # if gen_config is None:
-        if True:
+        if False:
             response = self._llm.generate(prompt_list, sampling_params=self.gen_config)
         else:
             response = self._llm.generate(prompt_list, gen_config)
