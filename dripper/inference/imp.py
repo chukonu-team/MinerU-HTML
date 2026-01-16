@@ -4,7 +4,7 @@ from typing import override
 from vllm import LLM, SamplingParams
 import asyncio
 from vllm import AsyncLLMEngine, AsyncEngineArgs
-
+import uuid
 
 class InferenceBackend(ABC):
     @abstractmethod
@@ -18,6 +18,11 @@ class InferenceBackend(ABC):
     @abstractmethod
     def stop(self):
         pass
+    
+    @abstractmethod
+    async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
+        pass
+
 
 
 class VLLMInferenceBackend(InferenceBackend):
@@ -27,7 +32,7 @@ class VLLMInferenceBackend(InferenceBackend):
         )
         # self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size)
         # self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size, kv_cache_dtype="fp8_e5m2", disable_log_stats=False, max_num_seqs=64, gpu_memory_utilization=0.9)
-        self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size, disable_log_stats=True
+        self._llm = LLM(model=model_path, tensor_parallel_size=tensor_parallel_size, disable_log_stats=False
         # , log_level="INFO"
         , gpu_memory_utilization=0.9)
 
@@ -47,6 +52,10 @@ class VLLMInferenceBackend(InferenceBackend):
     @override
     def stop(self):
         # return self._llm.llm_engine.engine_core.stop()
+        pass
+    
+    @override
+    async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
         pass
 
 
@@ -73,7 +82,7 @@ class VLLMInferenceBackendAsync(InferenceBackend):
 
     @override
     def generate(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
-        raw_results = asyncio.run(self.runAsync(prompt_list,self.gen_config))
+        raw_results = asyncio.run(self.generateAsync(prompt_list,self.gen_config))
         return raw_results
 
     @override
@@ -84,21 +93,29 @@ class VLLMInferenceBackendAsync(InferenceBackend):
     def stop(self):
         # return self._llm.llm_engine.engine_core.stop()
         pass
-
-    async def runAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
-        tasks = [self.infer_single_request(prompt, idx) for idx, prompt in enumerate(prompt_list)]
-        # 并行执行所有任务，等待全部完成
-        raw_results = await asyncio.gather(*tasks)
-
-        # ========== 关键一步：按原始序号排序，保证输入顺序=输出顺序 ==========
-        final_results = sorted(raw_results, key=lambda x: int(x.request_id))
-
-        print(f"\n🎉 全部推理完成！总结果数: {len(final_results)} | 输入顺序=输出顺序 ✔️")
+    
+    # @abstractmethod
+    # async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
+    #     tasks = [self.infer_single_request(prompt, idx) for idx, prompt in enumerate(prompt_list)]
+    #     # 并行执行所有任务，等待全部完成
+    #     raw_results = await asyncio.gather(*tasks)
+    #     # ========== 关键一步：按原始序号排序，保证输入顺序=输出顺序 ==========
+    #     final_results = sorted(raw_results, key=lambda x: int(x.request_id))
+    #     print(f"\n🎉 全部推理完成！总结果数: {len(final_results)} | 输入顺序=输出顺序 ✔️")
+    #     return final_results
+    
+    @override
+    async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
+        final_results = []
+        for idx, prompt in enumerate(prompt_list):
+            req_id = str(uuid.uuid4())[:8]
+            output = await self.infer_single_request(prompt, req_id)
+            final_results.append(output)
         return final_results
 
-    async def infer_single_request(self, prompt: str, idx: int):
+    async def infer_single_request(self, prompt: str, req_id: str):
         """单条请求的异步推理函数 - 核心：batch_size=1"""
-        async for output in self.async_engine.generate(prompt, self.gen_config, str(idx)):
+        async for output in self.async_engine.generate(prompt, self.gen_config, req_id):
              final_output = output
         return final_output
         # return {

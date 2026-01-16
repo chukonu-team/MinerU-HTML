@@ -11,7 +11,8 @@ import traceback
 import math
 import multiprocessing as mp
 from warcio.archiveiterator import ArchiveIterator
-
+import asyncio
+from asyncio import Lock
 # 导入简化的进程池
 from process_pool import SimpleProcessPool
 from dripper.api import Dripper
@@ -19,7 +20,7 @@ from abc import ABC, abstractmethod
 # Initialize with model path
 dripper = Dripper(
     config={
-        'model_path': os.environ.get("MODEL_PATH", "/data/models"),  # Required
+        'model_path': os.environ.get("MODEL_PATH", "/data/cenj2/data_v/models"),  # Required
         'tp': os.environ.get("TENSOR_PARALLEL", 1),  # Tensor parallel size
         'use_fall_back': True,  # Enable trafilatura fallback
         'raise_errors': False,  # Return None on errors
@@ -203,11 +204,21 @@ class HtmlListDataIO(DataIOBase):
                     self.html_list.extend(html_list)
                     # 记录文件信息：文件路径、HTML内容索引
                     for i, html in enumerate(html_list):
+                        # 生成文件名
+                        file_base_name = os.path.basename(file_path).replace('.warc.gz', '')
+                        if len(html_list) == 1:
+                            # 如果文件只有一个HTML，使用原始文件名
+                            result_file_name = f"{file_base_name}.html.gz"
+                        else:
+                            # 如果文件有多个HTML，添加索引
+                            result_file_name = f"{file_base_name}_{i}.html.gz"
+                        result_file_path = os.path.join(self.save_dir, result_file_name)
                         self.file_info.append({
                             'file_path': file_path,
                             'html_index': i,
-                            'file_base_name': os.path.basename(file_path).replace('.warc.gz', ''),
-                            'total_in_file': len(html_list)
+                            'file_base_name': file_base_name,
+                            'total_in_file': len(html_list),
+                            "result_file_path": result_file_path
                         })
                 else:
                     # result['failed'] += 1
@@ -241,8 +252,12 @@ class HtmlListDataIO(DataIOBase):
         end_index = min(self.current_index + batch_size, self.total_count)
         
         # 获取当前批次的数据
-        data_batch = self.html_list[self.current_index:end_index]
-        print(f"consume_batch: start_index:{self.current_index}, end_index:{end_index}")
+        data_batch = []
+        fileinfo_batch = []
+        if self.current_index < self.total_count:
+            data_batch = self.html_list[self.current_index:end_index]
+            fileinfo_batch = self.file_info[self.current_index:end_index]
+        # print(f"consume_batch: start_index:{self.current_index}, end_index:{end_index}")
         
         # 更新索引
         self.current_index = end_index
@@ -250,7 +265,7 @@ class HtmlListDataIO(DataIOBase):
         # 检查是否还有更多数据
         has_data_flag = self.current_index < self.total_count
         
-        return data_batch, has_data_flag
+        return data_batch, fileinfo_batch, has_data_flag
 
     def result_callback_batch(self, batch_id, html_str_list):
         start_index = (batch_id)*self.batch_size
@@ -347,7 +362,7 @@ class DripperRunner:
             index = 1
             while has_data:
                                 # 获取下一批数据
-                html_list, has_data = self.html_data_io.consume_batch()
+                html_list, fileinfo_batch, has_data = self.html_data_io.consume_batch()
                 current_batch = html_list
                 print(f"Worker {worker_id}: Processing batch starting at index {index}, size {len(current_batch)}")
                 
@@ -486,6 +501,119 @@ class DripperRunner:
         self.generate_result_queue.close()
         self.generate_result_queue.join_thread()
         
+active_task_num = 0   # 活跃task计数器：记录当前运行中的task数量
+task_lock = Lock()    # 异步锁：保证计数器加减的原子性，防止并发错乱
+        
+class DripperRunnerAsync:
+    def __init__(self, dripper: Dripper, html_data_io: HtmlListDataIO):
+        """
+        初始化 DripperRunner
+        
+        Args:
+            dripper: Dripper实例
+            html_data_io: HTML数据生产者实例
+            config: 配置字典（可选，如果提供则会覆盖dripper的设置）
+        """
+        self.dripper = dripper
+        html_data_io.batch_size = 1  # 强制每次只取一个，方便演示
+        self.html_data_io = html_data_io
+        self.process_running = True
+        
+        self.concurrency_limit = 128  # 并发限制
+        # 关闭调试模式，提升协程调度效率
+        # asyncio.get_event_loop().set_debug(False)
+        # 运行推理
+        final_results = asyncio.run(self.constant_concurrent_infer())
+        print("All processing completed.")
+
+    async def constant_concurrent_infer(self):
+        for _ in range(self.concurrency_limit):
+            await self.create_task_and_consume()
+        # 核心：永久运行，不让协程退出！替代原来的gather阻塞
+        # 这是异步无限运行的标准写法，CPU占用极低
+        has_data = True
+        while True:
+            await asyncio.sleep(1)
+            # 守护逻辑：如果活跃任务数不足MAX_CONCURRENT，自动补位
+            global active_task_num
+            async with task_lock:
+                if active_task_num < self.concurrency_limit:
+                    if has_data:
+                        need_create = self.concurrency_limit - active_task_num 
+                        for _ in range(need_create):
+                            has_data = await self.create_task_and_consume()
+                if active_task_num == 0:
+                    has_data = False
+                    break
+        print("All tasks completed.")
+        
+
+    async def process_single_data(self, html_str, fileinfo):
+        """单个数据的异步处理逻辑，可替换为你的业务代码"""
+        try:
+
+            # 异步后处理
+            batch_results = await self.dripper.processAsync([html_str])
+            # 保存结果
+            result_content = batch_results[0].main_html
+            result_file_path = fileinfo['result_file_path']
+            try:
+                # 确保内容是字节类型
+                if isinstance(result_content, str):
+                    result_content = result_content.encode('utf-8')
+
+                with gzip.open(result_file_path, 'wb') as f:
+                    f.write(result_content)
+
+            except Exception as e:
+                print(f"Error saving {result_file_path}: {e}")
+        except Exception as e:
+            print(f"Error processing single data: {e}")
+        pass
+
+    async def create_task_and_consume(self):
+        """核心：创建单个task+消费数据，执行完自动补位，带计数器"""
+        global active_task_num
+        try:
+            html_list, fileinfo_batch, has_data = self.html_data_io.consume_batch(1)
+            if len(html_list) > 0:
+                # data = None
+                task_id = int(time.time() * 1000) % 10000
+                
+                # 定义task的完整生命周期：执行+完成后补位
+                async def task_wrapper():
+                    global active_task_num
+                    try:
+                        await self.process_single_data(html_list[0], fileinfo_batch[0])
+                    finally:
+                        # 核心：task执行完毕后，无论成功失败，都要【先减计数 → 再补位】
+                        async with task_lock:
+                            active_task_num -= 1
+                        # 补位：立刻创建新任务，保持并发量
+                        if has_data:
+                            await self.create_task_and_consume()
+                
+                # 创建后立刻加计数
+                async with task_lock:
+                    active_task_num += 1
+                
+                # 创建task并运行，不用加入列表，事件循环自动调度
+                asyncio.create_task(task_wrapper())
+                
+                # print(f"🔄 [{time.strftime('%H:%M:%S')}] 创建任务[{task_id}], | 当前活跃任务数: {active_task_num}")
+                return True
+            else:   
+                print(f"No more data to consume.")
+                return False
+        except Exception as e:
+            pass
+
+    def _cleanup_processes(self):
+        """
+        清理和等待所有子进程结束
+        """
+        pass
+        
 def process_batchEx(file_paths: List[str], save_dir: str, batch_id: int = 0) -> Dict[str, Any]:
     """
     批量处理文件
@@ -495,9 +623,9 @@ def process_batchEx(file_paths: List[str], save_dir: str, batch_id: int = 0) -> 
     file_info = []  # 记录每个文件的信息
     print(f"process_batchEx Begin!!")
     
-    html_data_io = HtmlListDataIO(file_paths, save_dir, batch_id, batch_size=200)
+    html_data_io = HtmlListDataIO(file_paths, save_dir, batch_id, batch_size=1)
     try:
-        runner = DripperRunner(dripper, html_data_io)
+        runner = DripperRunnerAsync(dripper, html_data_io)
     except Exception as e:
         print(f"process_batchEx Batch {batch_id} processing failed: {str(e)}")
         traceback.print_exc()
@@ -592,7 +720,6 @@ def process_batch(file_paths: List[str], save_dir: str, batch_id: int = 0) -> Di
 
     return result
 
-
 def gpu_worker_task(file_paths: List[str], save_dir: str, batch_id: int = 0, gpu_id=None):
     """
     GPU工作进程的任务函数 - 批量处理版本
@@ -615,7 +742,6 @@ def gpu_worker_task(file_paths: List[str], save_dir: str, batch_id: int = 0, gpu
             'batch_id': batch_id,
             'traceback': traceback.format_exc()
         }
-
 
 class SimpleMinerUPool:
 
@@ -769,7 +895,6 @@ class SimpleMinerUPool:
         if hasattr(self, 'process_pool'):
             self.process_pool.shutdown()
 
-
 def process_html(
         input_dir,
         output_dir,
@@ -802,7 +927,6 @@ def process_html(
         results = pool.process_files(files, output_dir)
 
     return results
-
 
 if __name__ == "__main__":
     import argparse
