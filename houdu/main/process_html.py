@@ -553,7 +553,7 @@ class DripperRunnerAsync:
         try:
 
             # 异步后处理
-            batch_results = await self.dripper.processAsync([html_str])
+            batch_results = await self.dripper.processAsync(html_str)
             # 保存结果
             result_content = batch_results[0].main_html
             result_file_path = fileinfo['result_file_path']

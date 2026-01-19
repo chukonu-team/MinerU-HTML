@@ -124,7 +124,8 @@ def generate(
 
 async def generateAsync(
     llm: InferenceBackend,
-    input: Union[DripperGenerateInput, list[DripperGenerateInput], str, list[str]],
+    # input: Union[DripperGenerateInput, list[DripperGenerateInput], str, list[str]],
+    input: Union[DripperGenerateInput, str], # only support single input for async
     use_state_machine: str = 'v1',
 ) -> list[DripperGenerateOutput]:
     """
@@ -212,7 +213,7 @@ async def generateAsync(
         # Use base_gen_config without logits processors
         sampling_params_arg = base_gen_config
     # Perform batch generation
-    res_list = await llm.generateAsync(prompt_list, sampling_params_list)
+    res_list = await llm.generateAsync(prompt_list, sampling_params_list[0])
 
     # Convert results to DripperGenerateOutput objects
     output_list = []

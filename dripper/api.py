@@ -786,7 +786,8 @@ class Dripper:
         
     async def processAsync(
         self,
-        input_data: Union[DripperInput, List[DripperInput], str, List[str]],
+        # input_data: Union[DripperInput, List[DripperInput], str, List[str]],
+        input_data: Union[DripperInput, str], # only support single input for async
     ) -> Union[List[DripperOutput], Tuple]:
         """
         Process input and return results.
@@ -806,6 +807,7 @@ class Dripper:
             DripperError: When errors occur during processing (if raise_errors=True)
         """
         try:
+            
             # Normalize input format
             input_map = self._normalize_input(input_data)
             # logger.info(f'Starting to process {len(input_map)} inputs')
@@ -829,11 +831,14 @@ class Dripper:
             llm = self.get_llm()
             # logger.info('Starting model inference')
             to_process_keys = sorted(generate_inputs.keys())
-            generate_outputs = await generateAsync(
-                llm,
-                [generate_inputs[key] for key in to_process_keys],
-                self.state_machine,
-            )
+            generate_outputs = []
+            if len(to_process_keys) > 0:
+                generate_outputs = await generateAsync(
+                    llm,
+                    # [generate_inputs[key] for key in to_process_keys],
+                    generate_inputs[to_process_keys[0]],
+                    self.state_machine,
+                )
             # logger.info('Starting post process')
 
             # Postprocess all outputs

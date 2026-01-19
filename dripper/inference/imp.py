@@ -94,34 +94,16 @@ class VLLMInferenceBackendAsync(InferenceBackend):
         # return self._llm.llm_engine.engine_core.stop()
         pass
     
-    # @abstractmethod
-    # async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
-    #     tasks = [self.infer_single_request(prompt, idx) for idx, prompt in enumerate(prompt_list)]
-    #     # 并行执行所有任务，等待全部完成
-    #     raw_results = await asyncio.gather(*tasks)
-    #     # ========== 关键一步：按原始序号排序，保证输入顺序=输出顺序 ==========
-    #     final_results = sorted(raw_results, key=lambda x: int(x.request_id))
-    #     print(f"\n🎉 全部推理完成！总结果数: {len(final_results)} | 输入顺序=输出顺序 ✔️")
-    #     return final_results
-    
     @override
     async def generateAsync(self, prompt_list: list[str], gen_config: SamplingParams = None) -> list[str]:
         final_results = []
         for idx, prompt in enumerate(prompt_list):
             req_id = str(uuid.uuid4())[:8]
-            output = await self.infer_single_request(prompt, req_id)
+            output = await self.infer_single_request(prompt, req_id, gen_config)
             final_results.append(output)
         return final_results
 
-    async def infer_single_request(self, prompt: str, req_id: str):
-        """单条请求的异步推理函数 - 核心：batch_size=1"""
-        async for output in self.async_engine.generate(prompt, self.gen_config, req_id):
+    async def infer_single_request(self, prompt: str, req_id: str, gen_config: SamplingParams = None):
+        async for output in self.async_engine.generate(prompt, gen_config, req_id):
              final_output = output
         return final_output
-        # return {
-        #     "index": idx,          # 绑定请求的原始序号，用于后续排序
-        #     "prompt": prompt,
-        #     "response": output.outputs[0].text.strip(),
-        #     "finish_reason": output.outputs[0].finish_reason,
-        #     "token_num": len(output.outputs[0].token_ids)
-        # }
