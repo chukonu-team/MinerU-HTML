@@ -103,6 +103,13 @@ class Dripper:
             self.get_llm()
             self.get_tokenizer()
             self.get_trafilatura()
+            
+    def stop(self):
+        """
+        Stop the LLM inference backend if it has a stop method.
+        """
+        if self._llm is not None and hasattr(self._llm, 'stop'):
+            self._llm.stop()
 
     def get_trafilatura(self):
         """
@@ -207,13 +214,18 @@ class Dripper:
             try:
                 logger.info(f'Loading model: {self.model_path}')
                 if self.inference_backend == 'vllm':
-                    self._llm = VLLMInferenceBackendAsync(
+                    self._llm = VLLMInferenceBackend(
                         model_path=self.model_path, tensor_parallel_size=self.tp,
                     )
                 else:
-                    raise DripperConfigError(
-                        f'Unsupported inference backend: {self.inference_backend}'
-                    )
+                    if self.inference_backend == 'vllm_async':
+                        self._llm = VLLMInferenceBackendAsync(
+                            model_path=self.model_path, tensor_parallel_size=self.tp,
+                        )   
+                    else:
+                        raise DripperConfigError(
+                            f'Unsupported inference backend: {self.inference_backend}'
+                        )
                 logger.info('Model loading completed')
             except Exception as e:
                 raise DripperLoadModelError(

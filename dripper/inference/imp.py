@@ -51,6 +51,7 @@ class VLLMInferenceBackend(InferenceBackend):
 
     @override
     def stop(self):
+        self._llm.llm_engine.engine_core.shutdown()
         # return self._llm.llm_engine.engine_core.stop()
         pass
     
@@ -91,7 +92,7 @@ class VLLMInferenceBackendAsync(InferenceBackend):
 
     @override
     def stop(self):
-        # return self._llm.llm_engine.engine_core.stop()
+        return self.async_engine.shutdown()
         pass
     
     @override

@@ -24,6 +24,7 @@ dripper = Dripper(
         'tp': os.environ.get("TENSOR_PARALLEL", 1),  # Tensor parallel size
         'use_fall_back': True,  # Enable trafilatura fallback
         'raise_errors': False,  # Return None on errors
+        'inference_backend': os.environ.get("INFERENCE_BACKEND", "vllm_async") # vllm or vllm_async
     }
 )
 
@@ -342,6 +343,10 @@ class DripperRunner:
         self.post_process = self.start_postprocess_worker(2)
         
         self.run()
+        print("DripperRunner run completed.")
+        
+        self.dripper.stop()
+        print("dripper stop completed.")
     
     def start_preprocess_worker(self, worker_id: int = 1):
         """
@@ -525,6 +530,8 @@ class DripperRunnerAsync:
         # 运行推理
         final_results = asyncio.run(self.constant_concurrent_infer())
         print("All processing completed.")
+        self.dripper.stop()
+        print("dripper stop completed.")
 
     async def constant_concurrent_infer(self):
         for _ in range(self.concurrency_limit):
@@ -623,9 +630,18 @@ def process_batchEx(file_paths: List[str], save_dir: str, batch_id: int = 0) -> 
     file_info = []  # 记录每个文件的信息
     print(f"process_batchEx Begin!!")
     
-    html_data_io = HtmlListDataIO(file_paths, save_dir, batch_id, batch_size=1)
+    isAsync = os.environ.get("INFERENCE_BACKEND", "vllm_async") == "vllm_async"
+    print(f"process_batchEx isAsync:{isAsync}")
+    
+    if isAsync:
+        html_data_io = HtmlListDataIO(file_paths, save_dir, batch_id, batch_size=1) # for async 
+    else:
+        html_data_io = HtmlListDataIO(file_paths, save_dir, batch_id, batch_size=100) # for sync
     try:
-        runner = DripperRunnerAsync(dripper, html_data_io)
+        if isAsync:
+            runner = DripperRunnerAsync(dripper, html_data_io)
+        else:
+            runner = DripperRunner(dripper, html_data_io)
     except Exception as e:
         print(f"process_batchEx Batch {batch_id} processing failed: {str(e)}")
         traceback.print_exc()
