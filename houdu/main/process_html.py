@@ -51,8 +51,47 @@ def read_html_from_warc_gz(warc_gz_path: str) -> list[str]:
                 return []
 
         # 转换为字符串以便查找
-        data_str = decompressed_data.decode('utf-8', errors='ignore')
-        html_list.append(data_str)
+        # data_str = decompressed_data.decode('utf-8', errors='ignore')
+        file_like_object = io.BytesIO(decompressed_data)
+                # 遍历 WARC 中的所有记录
+        for record in ArchiveIterator(file_like_object):
+            # 1. 筛选 HTTP 响应记录（只有 response 类型才包含网页内容）
+            # 记录类型：response（响应）、request（请求）、metadata（元数据）等
+            if record.rec_type != 'response':
+                continue
+
+            # 2. 验证 Content-Type 是 HTML（避免提取图片、JS、CSS 等非 HTML 内容）
+            content_type = record.http_headers.get('Content-Type', '')
+            if 'text/html' not in content_type.lower():
+                continue
+
+            # 3. 读取响应体（网页原始数据），解码为字符串
+            try:
+                # 读取字节流，按 HTTP 编码解码（优先从 headers 取 charset，默认 utf-8）
+                html_bytes = record.content_stream().read()
+                charset = 'utf-8'  # 默认编码
+                # 从 Content-Type 中提取字符集（如：text/html; charset=utf-8）
+                for part in content_type.split(';'):
+                    part = part.strip()
+                    if part.startswith('charset='):
+                        charset = part.split('=')[-1].strip()
+                        break
+                # 解码为字符串（忽略非法字符，避免解码报错）
+                html_str = html_bytes.decode(charset, errors='ignore').strip()
+            except Exception as e:
+                logger.info(f"警告：解析记录失败 - {str(e)}")
+                continue
+
+            # 4. 过滤空字符串和重复 HTML
+            # if html_str and html_str not in seen_html:
+            #     seen_html.add(html_str)
+            #     html_list.append(html_str)
+            if html_str:
+                html_list.append(html_str)
+            # if len(html_list) % 10000 == 0:
+            #     break
+
+        # html_list.append(data_str)
     except Exception as e:
         print(f"Error reading {warc_gz_path}: {e}")
 
